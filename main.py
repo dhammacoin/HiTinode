@@ -8,8 +8,10 @@ from threading import Thread
 
 BOT_LOGIN = os.getenv('BOT_LOGIN')
 BOT_PASSWORD = os.getenv('BOT_PASSWORD')
+API_KEY = os.getenv('API_KEY', '')  # Опционально для api.tinode.co
 HOST = "api.tinode.co"
-WS_URL = f"wss://{HOST}/v0/channels"
+# Добавляем API ключ в URL если он установлен
+WS_URL = f"wss://{HOST}/v0/channels" + (f"?apikey={API_KEY}" if API_KEY else "")
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +31,12 @@ class TinodeBot:
     def get_next_id(self):
         self.msg_id += 1
         return str(self.msg_id)
+    
+    def get_headers(self):
+        """Возвращает заголовки с API ключом для api.tinode.co"""
+        if not API_KEY:
+            return None
+        return [f"X-Tinode-APIKey: {API_KEY}"]
     
     def send_message(self, msg_type, data):
         """Отправляет сообщение на сервер"""
@@ -130,6 +138,9 @@ class TinodeBot:
         if not BOT_LOGIN or not BOT_PASSWORD:
             logger.error("❌ ОШИБКА: Проверь переменные BOT_LOGIN и BOT_PASSWORD!")
             return False
+        
+        if not API_KEY:
+            logger.warning("⚠️  API_KEY не установлен. Может потребоваться для api.tinode.co")
         
         logger.info(f"🚀 Попытка входа для: {BOT_LOGIN}...")
         logger.info(f"📡 Подключаемся к {WS_URL}...")
