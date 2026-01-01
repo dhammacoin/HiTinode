@@ -6,12 +6,12 @@ import websocket
 import base64
 from threading import Thread
 
-BOT_LOGIN = os.getenv('BOT_LOGIN')
-BOT_PASSWORD = os.getenv('BOT_PASSWORD')
-API_KEY = os.getenv('API_KEY', '')  # Опционально для api.tinode.co
-HOST = "api.tinode.co"
-# Добавляем API ключ в URL если он установлен
-WS_URL = f"wss://{HOST}/v0/channels" + (f"?apikey={API_KEY}" if API_KEY else "")
+BOT_LOGIN = os.getenv('BOT_LOGIN', 'alice')
+BOT_PASSWORD = os.getenv('BOT_PASSWORD', 'alice123')
+API_KEY = os.getenv('API_KEY', '')  # Опционально
+HOST = "sandbox.tinode.co"  # Используем sandbox вместо api.tinode.co
+# API ключ не требуется для sandbox
+WS_URL = f"wss://{HOST}/v0/channels"
 
 # Configure logging
 logging.basicConfig(
