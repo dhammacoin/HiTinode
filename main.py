@@ -1,4 +1,23 @@
-import os
+options = [
+                ('grpc.max_receive_message_length', 10 * 1024 * 1024),
+                ('grpc.max_send_message_length', 10 * 1024 * 1024),
+                ('grpc.keepalive_time_ms', 30000),
+                ('grpc.keepalive_timeout_ms', 10000),
+                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.max_connection_idle_ms', 60000),
+                ('grpc.ssl_target_name_override', 'api.tinode.co'),  # Явная установка SNI
+            ]
+            
+            try:
+                # Сначала пытаемся с дефолтными credentials
+                credentials = grpc.ssl_channel_credentials()
+            except Exception as e:
+                logger.warning(f"⚠️  Ошибка при создании SSL credentials: {e}")
+                credentials = None
+            
+            logger.info(f"📡 Подключаемся к {HOST}...")
+            
+            self.channel = grpc.secure_channel(HOST, credentials, options=options)import os
 import time
 import grpc
 import logging
@@ -43,8 +62,7 @@ class TinodeBot:
             yield pb.ClientMsg(
                 hi=pb.ClientHi(
                     id=self.get_next_id(),
-                    user_agent="RailwayBot/1.0",
-                    protocol="GRPC"
+                    user_agent="RailwayBot/1.0"
                 )
             )
             time.sleep(0.5)  # Небольшая пауза
