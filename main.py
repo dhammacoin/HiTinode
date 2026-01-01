@@ -25,44 +25,52 @@ def run():
     
     channel = None
     try:
-        # Create secure channel with default SSL credentials
+        # Вариант 1: Используем встроенные корневые сертификаты
+        # с явной настройкой ALPN
+        options = [
+            ('grpc.max_receive_message_length', 10 * 1024 * 1024),
+            ('grpc.keepalive_time_ms', 30000),
+            ('grpc.keepalive_timeout_ms', 10000),
+            ('grpc.http2.max_pings_without_data', 0),
+        ]
+        
+        # Пытаемся подключиться с дефолтными SSL credentials
         credentials = grpc.ssl_channel_credentials()
-        channel = grpc.secure_channel(
-            HOST, 
-            credentials,
-            options=[
-                ('grpc.max_receive_message_length', 10 * 1024 * 1024),  # 10MB
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 10000),
-            ]
-        )
+        channel = grpc.secure_channel(HOST, credentials, options=options)
+        
+        # Убеждаемся, что канал готов
+        try:
+            grpc.channel_ready_future(channel).result(timeout=10)
+            logger.info("✅ Канал успешно подключен")
+        except grpc.FutureTimeoutError:
+            logger.warning("⚠️  Канал не готов за 10 сек, но попытаемся все равно...")
         
         stub = pbx.NodeStub(channel)
         
         def generate_msgs():
-            """Generate messages for the MessageLoop"""
-            # 1. Greeting
+            """Генерируем сообщения для MessageLoop"""
+            # 1. Приветствие
             yield pb.ClientMsg(hi=pb.ClientHi(id="1", user_agent="RailwayBot/1.0"))
             
-            # 2. Login with basic auth
+            # 2. Логин с базовой аутентификацией
             secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
             yield pb.ClientMsg(
                 login=pb.ClientLogin(id="2", scheme="basic", secret=secret)
             )
             
-            # 3. Subscribe to notifications
+            # 3. Подписка на уведомления
             yield pb.ClientMsg(sub=pb.ClientSub(id="3", topic="me"))
         
-        logger.info("📡 Канал создан, запускаем MessageLoop...")
+        logger.info("📡 Запускаем MessageLoop...")
         
-        # Set timeout for the call
+        # Основной цикл обработки сообщений
         try:
-            call = stub.MessageLoop(generate_msgs(), timeout=300)
+            call = stub.MessageLoop(generate_msgs(), timeout=600)
             for msg in call:
                 if msg.HasField('ctrl'):
                     logger.info(f"📡 Ответ сервера: {msg.ctrl.code} {msg.ctrl.text}")
                     
-                    # Check for successful login
+                    # Проверяем успешную аутентификацию
                     if msg.ctrl.code == 200:
                         logger.info("✅ Успешная аутентификация!")
                     elif msg.ctrl.code >= 400:
@@ -75,17 +83,23 @@ def run():
                         logger.info(f"   Содержание: {msg.data.content}")
                 
                 if msg.HasField('info'):
-                    logger.info(f"ℹ️  Информация: {msg.info}")
+                    logger.debug(f"ℹ️  Информация: {msg.info}")
                     
         except grpc.RpcError as rpc_error:
             logger.error(f"❌ gRPC ошибка ({rpc_error.code()}): {rpc_error.details()}")
+            
+            # Более детальная информация об ошибке
+            if "ALPN" in rpc_error.details() or "peer" in rpc_error.details():
+                logger.error("⚠️  Проблема с SSL/TLS ALPN negotiation")
+                logger.error("💡 Совет: Проверь, что сервер поддерживает gRPC через HTTP/2")
+            
             return False
             
     except grpc.GrpcError as e:
         logger.error(f"❌ Ошибка подключения: {e}")
         return False
     except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка: {e}")
+        logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
         return False
     finally:
         if channel:
@@ -102,18 +116,18 @@ if __name__ == '__main__':
         try:
             success = run()
             if not success:
-                # Exponential backoff on failure
+                # Экспоненциальная задержка при ошибке
                 logger.warning(f"🔄 Рестарт через {restart_delay} сек...")
                 time.sleep(restart_delay)
                 restart_delay = min(restart_delay * 2, max_restart_delay)
             else:
-                # Reset delay on success
+                # Сброс задержки при успехе
                 restart_delay = 5
         except KeyboardInterrupt:
             logger.info("⏹️  Остановка бота...")
             break
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка: {e}")
+            logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
             logger.warning(f"🔄 Рестарт через {restart_delay} сек...")
             time.sleep(restart_delay)
             restart_delay = min(restart_delay * 2, max_restart_delay)
