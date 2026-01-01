@@ -9,12 +9,19 @@ HOST = "api.tinode.co:443"
 BOT_LOGIN = os.getenv('BOT_LOGIN')
 BOT_PASSWORD = os.getenv('BOT_PASSWORD')
 
-# Configure logging
+# Configure logging - важно для Railway!
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Вывод в stdout (видно в Railway)
+        logging.FileHandler('/tmp/tinode_bot.log')  # Также в файл
+    ]
 )
 logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("🤖 TINODE BOT STARTED")
+logger.info("=" * 60)
 
 def run():
     if not BOT_LOGIN or not BOT_PASSWORD:
@@ -59,26 +66,41 @@ def run():
             yield pb.ClientMsg(sub=pb.ClientSub(id="3", topic="me"))
         
         logger.info("🔄 Запускаем MessageLoop...")
+        logger.info("⏳ Ожидание первого сообщения от сервера...")
+        
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
         
         message_count = 0
         error_count = 0
+        last_activity = time.time()
         
         try:
             # Используем wait_for_ready=True для Railway, чтобы она ждала подключения
+            logger.debug("📡 Создаем RPC call...")
             call = stub.MessageLoop(
                 generate_msgs(), 
                 timeout=600,
                 wait_for_ready=True
             )
+            logger.debug("✅ RPC call создан, итерируем ответы...")
+            sys.stdout.flush()
             
             for msg in call:
+                current_time = time.time()
+                logger.debug(f"⏱️  Получено сообщение (прошло {current_time - last_activity:.2f}s)")
                 try:
                     message_count += 1
+                    last_activity = time.time()
+                    logger.debug(f"📥 Сообщение #{message_count} получено")
+                    sys.stdout.flush()
                     
                     if msg.HasField('ctrl'):
                         code = msg.ctrl.code
                         text = msg.ctrl.text
                         logger.info(f"📡 Сервер [{code}]: {text}")
+                        sys.stdout.flush()
                         
                         if code == 200:
                             logger.info("✅ Успешная аутентификация!")
@@ -149,6 +171,11 @@ if __name__ == '__main__':
     logger.info("🤖 Запуск Tinode бота для Railway...")
     logger.info(f"🌐 Адрес сервера: {HOST}")
     logger.info(f"👤 Пользователь: {BOT_LOGIN if BOT_LOGIN else 'не установлен'}")
+    logger.flush() if hasattr(logger, 'flush') else None
+    
+    import sys
+    sys.stdout.flush()
+    sys.stderr.flush()
     
     while True:
         try:
