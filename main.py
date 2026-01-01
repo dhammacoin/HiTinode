@@ -1,56 +1,54 @@
 import os
 import time
+import grpc
 from tinode_grpc import pb
 
-# Настройки из переменных окружения (безопасно!)
+# Настройки из переменных окружения
 HOST = "api.tinode.co:443"
 BOT_LOGIN = os.getenv('BOT_LOGIN')
 BOT_PASSWORD = os.getenv('BOT_PASSWORD')
 
 def run():
-    # 1. Устанавливаем защищенное соединение (SSL)
-    channel = pb.grpc.secure_channel(HOST, pb.grpc.ssl_channel_credentials())
+    # 1. Создаем защищенный канал напрямую через библиотеку grpc
+    private_credentials = grpc.ssl_channel_credentials()
+    channel = grpc.secure_channel(HOST, private_credentials)
+    
+    # 2. Создаем "заглушку" (stub) для узла
     stub = pb.NodeStub(channel)
 
-    # 2. Приветствие сервера (Hi)
-    print(f"Подключение к {HOST}...")
-    stub.GetMessages(iter([pb.ClientMsg(hi=pb.ClientHi(id="1", user_agent="RailwayBot/1.0"))]))
+    print(f"Попытка подключения к {HOST}...")
 
-    # 3. Авторизация (Login)
-    print(f"Вход для пользователя: {BOT_LOGIN}...")
-    # Создаем генератор сообщений для стрима
+    # 3. Инициализация (Приветствие)
+    # Используем правильный путь к сообщениям
+    hi_msg = pb.ClientMsg(hi=pb.ClientHi(id="1", user_agent="RailwayBot/1.0"))
+    
+    # Чтобы поддерживать связь, нам нужно запустить поток (stream)
     def generate_msgs():
-        # Отправляем логин
-        yield pb.ClientMsg(login=pb.ClientLogin(id="2", scheme="basic", secret=f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')))
-        
-        # Подписываемся на сообщения (Me - это личные сообщения)
+        yield hi_msg
+        # Сообщение логина
+        secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
+        yield pb.ClientMsg(login=pb.ClientLogin(id="2", scheme="basic", secret=secret))
+        # Подписка на свои сообщения
         yield pb.ClientMsg(sub=pb.ClientSub(id="3", topic="me"))
 
-    # Запускаем поток прослушивания
-    messages = stub.GetMessages(generate_msgs())
-
-    print("✅ Бот успешно залогинился и слушает сообщения!")
-
-    for msg in messages:
-        if msg.HasField('ctrl'):
-            print(f"Статус от сервера: {msg.ctrl.text}")
+    try:
+        messages = stub.GetMessages(generate_msgs())
+        print("✅ Соединение установлено. Ожидание сообщений...")
         
-        # Если пришло сообщение (Data)
-        if msg.HasField('data'):
-            content = msg.data.content.decode('utf-8').strip('"')
-            sender = msg.data.from_user_id
-            print(f"📩 Получено сообщение от {sender}: {content}")
-
-            # Эхо-ответ: отправляем обратно
-            reply = pb.ClientMsg(pub=pb.ClientPub(id="4", topic=msg.data.topic, 
-                                content=f"Эхо: {content}".encode('utf-8')))
-            # В реальном боте здесь была бы логика ответа, 
-            # но для теста мы просто выводим в логи факт получения
-            print(f"📨 Бот прочитал: {content}")
+        for msg in messages:
+            if msg.HasField('ctrl'):
+                print(f"Статус сервера: {msg.ctrl.code} {msg.ctrl.text}")
+            
+            if msg.HasField('data'):
+                content = msg.data.content.decode('utf-8').strip('"')
+                print(f"📩 Новое сообщение: {content}")
+                
+    except Exception as e:
+        print(f"❌ Ошибка внутри потока: {e}")
 
 if __name__ == '__main__':
     try:
         run()
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        time.sleep(5) # Чтобы Railway не перезагружал мгновенно при ошибке
+        print(f"❌ Критическая ошибка: {e}")
+        time.sleep(10)
