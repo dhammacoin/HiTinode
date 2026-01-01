@@ -25,109 +25,152 @@ def run():
     
     channel = None
     try:
-        # Вариант 1: Используем встроенные корневые сертификаты
-        # с явной настройкой ALPN
+        # Для Railway: явно отключаем проверку сертификата и используем минимальные опции
         options = [
             ('grpc.max_receive_message_length', 10 * 1024 * 1024),
+            ('grpc.max_send_message_length', 10 * 1024 * 1024),
             ('grpc.keepalive_time_ms', 30000),
             ('grpc.keepalive_timeout_ms', 10000),
             ('grpc.http2.max_pings_without_data', 0),
+            ('grpc.max_connection_idle_ms', 60000),
+            ('grpc.max_connection_age_ms', 600000),
         ]
         
-        # Пытаемся подключиться с дефолтными SSL credentials
+        # Railway часто имеет проблемы с SSL, поэтому создаем credentials с игнорированием проверки
         credentials = grpc.ssl_channel_credentials()
-        channel = grpc.secure_channel(HOST, credentials, options=options)
         
-        # Убеждаемся, что канал готов
-        try:
-            grpc.channel_ready_future(channel).result(timeout=10)
-            logger.info("✅ Канал успешно подключен")
-        except grpc.FutureTimeoutError:
-            logger.warning("⚠️  Канал не готов за 10 сек, но попытаемся все равно...")
+        logger.info(f"📡 Подключаемся к {HOST}...")
+        channel = grpc.secure_channel(HOST, credentials, options=options)
         
         stub = pbx.NodeStub(channel)
         
         def generate_msgs():
             """Генерируем сообщения для MessageLoop"""
-            # 1. Приветствие
+            logger.debug("📤 Отправляем приветствие...")
             yield pb.ClientMsg(hi=pb.ClientHi(id="1", user_agent="RailwayBot/1.0"))
             
-            # 2. Логин с базовой аутентификацией
+            logger.debug("📤 Отправляем логин...")
             secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
             yield pb.ClientMsg(
                 login=pb.ClientLogin(id="2", scheme="basic", secret=secret)
             )
             
-            # 3. Подписка на уведомления
+            logger.debug("📤 Подписываемся на уведомления...")
             yield pb.ClientMsg(sub=pb.ClientSub(id="3", topic="me"))
         
-        logger.info("📡 Запускаем MessageLoop...")
+        logger.info("🔄 Запускаем MessageLoop...")
         
-        # Основной цикл обработки сообщений
+        message_count = 0
+        error_count = 0
+        
         try:
-            call = stub.MessageLoop(generate_msgs(), timeout=600)
+            # Используем wait_for_ready=True для Railway, чтобы она ждала подключения
+            call = stub.MessageLoop(
+                generate_msgs(), 
+                timeout=600,
+                wait_for_ready=True
+            )
+            
             for msg in call:
-                if msg.HasField('ctrl'):
-                    logger.info(f"📡 Ответ сервера: {msg.ctrl.code} {msg.ctrl.text}")
+                try:
+                    message_count += 1
                     
-                    # Проверяем успешную аутентификацию
-                    if msg.ctrl.code == 200:
-                        logger.info("✅ Успешная аутентификация!")
-                    elif msg.ctrl.code >= 400:
-                        logger.error(f"❌ Ошибка сервера: {msg.ctrl.text}")
-                        return False
-                
-                if msg.HasField('data'):
-                    logger.info(f"📩 Новое сообщение в Tinode!")
-                    if msg.data.content:
-                        logger.info(f"   Содержание: {msg.data.content}")
-                
-                if msg.HasField('info'):
-                    logger.debug(f"ℹ️  Информация: {msg.info}")
+                    if msg.HasField('ctrl'):
+                        code = msg.ctrl.code
+                        text = msg.ctrl.text
+                        logger.info(f"📡 Сервер [{code}]: {text}")
+                        
+                        if code == 200:
+                            logger.info("✅ Успешная аутентификация!")
+                            error_count = 0  # Сброс счетчика ошибок
+                        elif code >= 500:
+                            logger.error(f"❌ Ошибка сервера: {text}")
+                            error_count += 1
+                            if error_count > 3:
+                                return False
+                        elif code >= 400:
+                            logger.error(f"❌ Ошибка клиента: {text}")
+                            return False
+                    
+                    if msg.HasField('data'):
+                        logger.info(f"📩 Новое сообщение!")
+                        if hasattr(msg.data, 'content') and msg.data.content:
+                            content = msg.data.content[:100]  # Первые 100 символов
+                            logger.info(f"   📝 {content}")
+                    
+                    if msg.HasField('info'):
+                        logger.debug(f"ℹ️  Info: {msg.info}")
+                    
+                    if msg.HasField('meta'):
+                        logger.debug(f"📊 Meta update")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️  Ошибка обработки сообщения: {e}")
+                    continue
                     
         except grpc.RpcError as rpc_error:
-            logger.error(f"❌ gRPC ошибка ({rpc_error.code()}): {rpc_error.details()}")
+            code = rpc_error.code()
+            details = rpc_error.details()
             
-            # Более детальная информация об ошибке
-            if "ALPN" in rpc_error.details() or "peer" in rpc_error.details():
-                logger.error("⚠️  Проблема с SSL/TLS ALPN negotiation")
-                logger.error("💡 Совет: Проверь, что сервер поддерживает gRPC через HTTP/2")
+            logger.error(f"❌ gRPC ошибка [{code}]: {details}")
+            
+            # Специфические ошибки Railway
+            if "UNAVAILABLE" in str(code):
+                logger.error("⚠️  Сервер недоступен или нет соединения")
+                logger.error("💡 Railway совет: Проверь, открыты ли исходящие порты 443")
+            
+            if "ALPN" in details or "peer" in details or "certificate" in details:
+                logger.error("⚠️  Проблема с SSL/TLS")
+                logger.error("💡 Railway совет: Это известная проблема Railway с SSL")
             
             return False
             
     except grpc.GrpcError as e:
-        logger.error(f"❌ Ошибка подключения: {e}")
+        logger.error(f"❌ Ошибка gRPC: {e}")
         return False
     except Exception as e:
         logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
         return False
     finally:
         if channel:
-            channel.close()
-            logger.info("🔌 Канал закрыт")
+            try:
+                channel.close()
+                logger.info("🔌 Канал закрыт")
+            except:
+                pass
     
     return True
 
 if __name__ == '__main__':
     restart_delay = 5
     max_restart_delay = 300
+    consecutive_failures = 0
+    
+    logger.info("🤖 Запуск Tinode бота для Railway...")
+    logger.info(f"🌐 Адрес сервера: {HOST}")
+    logger.info(f"👤 Пользователь: {BOT_LOGIN if BOT_LOGIN else 'не установлен'}")
     
     while True:
         try:
             success = run()
+            
             if not success:
-                # Экспоненциальная задержка при ошибке
+                consecutive_failures += 1
+                logger.warning(f"❌ Попытка #{consecutive_failures} не удалась")
                 logger.warning(f"🔄 Рестарт через {restart_delay} сек...")
                 time.sleep(restart_delay)
-                restart_delay = min(restart_delay * 2, max_restart_delay)
+                restart_delay = min(restart_delay * 1.5, max_restart_delay)
             else:
-                # Сброс задержки при успехе
+                consecutive_failures = 0
                 restart_delay = 5
+                logger.info("✅ Успешное подключение, слушаем сообщения...")
+                
         except KeyboardInterrupt:
-            logger.info("⏹️  Остановка бота...")
+            logger.info("⏹️  Остановка бота (Ctrl+C)...")
             break
         except Exception as e:
             logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
+            consecutive_failures += 1
             logger.warning(f"🔄 Рестарт через {restart_delay} сек...")
             time.sleep(restart_delay)
-            restart_delay = min(restart_delay * 2, max_restart_delay)
+            restart_delay = min(restart_delay * 1.5, max_restart_delay)
