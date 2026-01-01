@@ -2,6 +2,7 @@ import os
 import time
 import grpc
 import logging
+import threading
 from tinode_grpc import pb
 from tinode_grpc import pbx
 
@@ -15,7 +16,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),  # Вывод в stdout (видно в Railway)
-        logging.FileHandler('/tmp/tinode_bot.log')  # Также в файл
     ]
 )
 logger = logging.getLogger(__name__)
@@ -23,174 +23,210 @@ logger.info("=" * 60)
 logger.info("🤖 TINODE BOT STARTED")
 logger.info("=" * 60)
 
-def run():
-    if not BOT_LOGIN or not BOT_PASSWORD:
-        logger.error("❌ ОШИБКА: Проверь переменные BOT_LOGIN и BOT_PASSWORD!")
-        return False
+class TinodeBot:
+    def __init__(self):
+        self.channel = None
+        self.stub = None
+        self.running = False
+        self.msg_id = 0
+        
+    def get_next_id(self):
+        """Генерируем уникальные ID для сообщений"""
+        self.msg_id += 1
+        return str(self.msg_id)
     
-    logger.info(f"🚀 Попытка входа для: {BOT_LOGIN}...")
-    
-    channel = None
-    try:
-        # Для Railway: явно отключаем проверку сертификата и используем минимальные опции
-        options = [
-            ('grpc.max_receive_message_length', 10 * 1024 * 1024),
-            ('grpc.max_send_message_length', 10 * 1024 * 1024),
-            ('grpc.keepalive_time_ms', 30000),
-            ('grpc.keepalive_timeout_ms', 10000),
-            ('grpc.http2.max_pings_without_data', 0),
-            ('grpc.max_connection_idle_ms', 60000),
-            ('grpc.max_connection_age_ms', 600000),
-        ]
-        
-        # Railway часто имеет проблемы с SSL, поэтому создаем credentials с игнорированием проверки
-        credentials = grpc.ssl_channel_credentials()
-        
-        logger.info(f"📡 Подключаемся к {HOST}...")
-        channel = grpc.secure_channel(HOST, credentials, options=options)
-        
-        stub = pbx.NodeStub(channel)
-        
-        def generate_msgs():
-            """Генерируем сообщения для MessageLoop"""
-            logger.debug("📤 Отправляем приветствие...")
-            yield pb.ClientMsg(hi=pb.ClientHi(id="1", user_agent="RailwayBot/1.0"))
+    def message_generator(self):
+        """Генератор сообщений - отправляет по одному с ожиданием"""
+        try:
+            # 1. Приветствие
+            logger.info("📤 [1] Отправляем HI (приветствие)...")
+            yield pb.ClientMsg(
+                hi=pb.ClientHi(
+                    id=self.get_next_id(),
+                    user_agent="RailwayBot/1.0",
+                    protocol="GRPC"
+                )
+            )
+            time.sleep(0.5)  # Небольшая пауза
             
-            logger.debug("📤 Отправляем логин...")
+            # 2. Логин
+            logger.info("📤 [2] Отправляем LOGIN...")
             secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
             yield pb.ClientMsg(
-                login=pb.ClientLogin(id="2", scheme="basic", secret=secret)
+                login=pb.ClientLogin(
+                    id=self.get_next_id(),
+                    scheme="basic",
+                    secret=secret
+                )
+            )
+            time.sleep(0.5)
+            
+            # 3. Подписка на 'me'
+            logger.info("📤 [3] Отправляем SUB (подписка)...")
+            yield pb.ClientMsg(
+                sub=pb.ClientSub(
+                    id=self.get_next_id(),
+                    topic="me"
+                )
             )
             
-            logger.debug("📤 Подписываемся на уведомления...")
-            yield pb.ClientMsg(sub=pb.ClientSub(id="3", topic="me"))
+            logger.info("✅ Все начальные сообщения отправлены, слушаем ответы...")
+            
+            # Держим connection открытым
+            while self.running:
+                time.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в message_generator: {e}", exc_info=True)
+    
+    def connect(self):
+        """Подключается к серверу Tinode"""
+        if not BOT_LOGIN or not BOT_PASSWORD:
+            logger.error("❌ ОШИБКА: Проверь переменные BOT_LOGIN и BOT_PASSWORD!")
+            return False
         
-        logger.info("🔄 Запускаем MessageLoop...")
-        logger.info("⏳ Ожидание первого сообщения от сервера...")
-        
-        import sys
-        sys.stdout.flush()
-        sys.stderr.flush()
-        
-        message_count = 0
-        error_count = 0
-        last_activity = time.time()
+        logger.info(f"🚀 Попытка входа для: {BOT_LOGIN}...")
         
         try:
-            # Используем wait_for_ready=True для Railway, чтобы она ждала подключения
-            logger.debug("📡 Создаем RPC call...")
-            call = stub.MessageLoop(
-                generate_msgs(), 
-                timeout=600,
-                wait_for_ready=True
-            )
-            logger.debug("✅ RPC call создан, итерируем ответы...")
+            options = [
+                ('grpc.max_receive_message_length', 10 * 1024 * 1024),
+                ('grpc.max_send_message_length', 10 * 1024 * 1024),
+                ('grpc.keepalive_time_ms', 30000),
+                ('grpc.keepalive_timeout_ms', 10000),
+                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.max_connection_idle_ms', 60000),
+            ]
+            
+            credentials = grpc.ssl_channel_credentials()
+            logger.info(f"📡 Подключаемся к {HOST}...")
+            
+            self.channel = grpc.secure_channel(HOST, credentials, options=options)
+            self.stub = pbx.NodeStub(self.channel)
+            self.running = True
+            
+            logger.info("🔄 Запускаем MessageLoop...")
+            logger.info("⏳ Ожидание ответов от сервера...")
+            
+            import sys
             sys.stdout.flush()
+            
+            # Вызываем MessageLoop с генератором
+            call = self.stub.MessageLoop(
+                self.message_generator(),
+                timeout=600
+            )
+            
+            logger.info("📡 Начинаем слушать сообщения...")
+            sys.stdout.flush()
+            
+            message_count = 0
+            consecutive_errors = 0
+            last_msg_time = time.time()
             
             for msg in call:
                 current_time = time.time()
-                logger.debug(f"⏱️  Получено сообщение (прошло {current_time - last_activity:.2f}s)")
+                elapsed = current_time - last_msg_time
+                last_msg_time = current_time
+                message_count += 1
+                
+                logger.debug(f"📥 Сообщение #{message_count} получено (спустя {elapsed:.2f}s)")
+                sys.stdout.flush()
+                
                 try:
-                    message_count += 1
-                    last_activity = time.time()
-                    logger.debug(f"📥 Сообщение #{message_count} получено")
-                    sys.stdout.flush()
-                    
+                    # Обработка ctrl сообщений
                     if msg.HasField('ctrl'):
                         code = msg.ctrl.code
                         text = msg.ctrl.text
-                        logger.info(f"📡 Сервер [{code}]: {text}")
+                        logger.info(f"📡 [CTRL {code}] {text}")
                         sys.stdout.flush()
                         
                         if code == 200:
                             logger.info("✅ Успешная аутентификация!")
-                            error_count = 0  # Сброс счетчика ошибок
+                            consecutive_errors = 0
                         elif code >= 500:
-                            logger.error(f"❌ Ошибка сервера: {text}")
-                            error_count += 1
-                            if error_count > 3:
+                            logger.error(f"❌ Ошибка сервера {code}: {text}")
+                            consecutive_errors += 1
+                            if consecutive_errors > 3:
+                                logger.error("Слишком много ошибок сервера, отключаемся")
                                 return False
                         elif code >= 400:
-                            logger.error(f"❌ Ошибка клиента: {text}")
+                            logger.error(f"❌ Ошибка клиента {code}: {text}")
                             return False
                     
+                    # Обработка data сообщений
                     if msg.HasField('data'):
                         logger.info(f"📩 Новое сообщение!")
                         if hasattr(msg.data, 'content') and msg.data.content:
-                            content = msg.data.content[:100]  # Первые 100 символов
+                            content = str(msg.data.content)[:100]
                             logger.info(f"   📝 {content}")
+                        sys.stdout.flush()
                     
-                    if msg.HasField('info'):
-                        logger.debug(f"ℹ️  Info: {msg.info}")
-                    
+                    # Обработка meta сообщений
                     if msg.HasField('meta'):
-                        logger.debug(f"📊 Meta update")
+                        logger.debug(f"📊 META update")
+                    
+                    # Обработка info сообщений
+                    if msg.HasField('info'):
+                        logger.debug(f"ℹ️  INFO: {msg.info}")
                         
                 except Exception as e:
                     logger.warning(f"⚠️  Ошибка обработки сообщения: {e}")
                     continue
-                    
+            
+            logger.warning("⚠️  MessageLoop завершился без ошибки (соединение закрыто)")
+            return True
+            
         except grpc.RpcError as rpc_error:
             code = rpc_error.code()
             details = rpc_error.details()
             
             logger.error(f"❌ gRPC ошибка [{code}]: {details}")
             
-            # Специфические ошибки Railway
             if "UNAVAILABLE" in str(code):
-                logger.error("⚠️  Сервер недоступен или нет соединения")
-                logger.error("💡 Railway совет: Проверь, открыты ли исходящие порты 443")
-            
-            if "ALPN" in details or "peer" in details or "certificate" in details:
+                logger.error("⚠️  Сервер недоступен")
+            if "ALPN" in details or "peer" in details:
                 logger.error("⚠️  Проблема с SSL/TLS")
-                logger.error("💡 Railway совет: Это известная проблема Railway с SSL")
             
             return False
             
-    except grpc.GrpcError as e:
-        logger.error(f"❌ Ошибка gRPC: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
-        return False
-    finally:
-        if channel:
-            try:
-                channel.close()
-                logger.info("🔌 Канал закрыт")
-            except:
-                pass
-    
-    return True
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
+            return False
+            
+        finally:
+            self.running = False
+            if self.channel:
+                try:
+                    self.channel.close()
+                    logger.info("🔌 Канал закрыт")
+                except:
+                    pass
 
-if __name__ == '__main__':
+def main():
     restart_delay = 5
     max_restart_delay = 300
     consecutive_failures = 0
     
-    logger.info("🤖 Запуск Tinode бота для Railway...")
-    logger.info(f"🌐 Адрес сервера: {HOST}")
-    logger.info(f"👤 Пользователь: {BOT_LOGIN if BOT_LOGIN else 'не установлен'}")
-    logger.flush() if hasattr(logger, 'flush') else None
+    logger.info("🌐 Адрес сервера: " + HOST)
+    logger.info("👤 Пользователь: " + (BOT_LOGIN if BOT_LOGIN else "не установлен"))
     
     import sys
     sys.stdout.flush()
-    sys.stderr.flush()
     
     while True:
         try:
-            success = run()
+            bot = TinodeBot()
+            success = bot.connect()
             
             if not success:
                 consecutive_failures += 1
                 logger.warning(f"❌ Попытка #{consecutive_failures} не удалась")
                 logger.warning(f"🔄 Рестарт через {restart_delay} сек...")
                 time.sleep(restart_delay)
-                restart_delay = min(restart_delay * 1.5, max_restart_delay)
+                restart_delay = min(int(restart_delay * 1.5), max_restart_delay)
             else:
                 consecutive_failures = 0
                 restart_delay = 5
-                logger.info("✅ Успешное подключение, слушаем сообщения...")
                 
         except KeyboardInterrupt:
             logger.info("⏹️  Остановка бота (Ctrl+C)...")
@@ -200,4 +236,7 @@ if __name__ == '__main__':
             consecutive_failures += 1
             logger.warning(f"🔄 Рестарт через {restart_delay} сек...")
             time.sleep(restart_delay)
-            restart_delay = min(restart_delay * 1.5, max_restart_delay)
+            restart_delay = min(int(restart_delay * 1.5), max_restart_delay)
+
+if __name__ == '__main__':
+    main()
