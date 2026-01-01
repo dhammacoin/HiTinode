@@ -15,30 +15,32 @@ def run():
 
     print(f"🚀 Попытка входа для: {BOT_LOGIN}...")
     
-    channel = grpc.secure_channel(HOST, grpc.ssl_channel_credentials())
+    # 1. Используем стандартные SSL сертификаты системы
+    credentials = grpc.ssl_channel_credentials()
+    
+    # 2. Добавляем опцию ALPN (h2 для HTTP/2), чтобы избежать ошибки 'missing ALPN'
+    channel_options = [('grpc.alpn_protocols', ['h2'])]
+    
+    # 3. Создаем канал с расширенными настройками
+    channel = grpc.secure_channel(HOST, credentials, options=channel_options)
     stub = pbx.NodeStub(channel)
 
     def generate_msgs():
-        # 1. Приветствие
         yield pb.ClientMsg(hi=pb.ClientHi(id="1", user_agent="RailwayBot/1.0"))
         
-        # 2. Логин
         secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
         yield pb.ClientMsg(login=pb.ClientLogin(id="2", scheme="basic", secret=secret))
-        
-        # 3. Подписка на уведомления
         yield pb.ClientMsg(sub=pb.ClientSub(id="3", topic="me"))
 
     try:
-        # В НОВОЙ ВЕРСИИ используем MessageLoop вместо GetMessages
+        # MessageLoop — правильный метод для текущей версии
         for msg in stub.MessageLoop(generate_msgs()):
             if msg.HasField('ctrl'):
                 print(f"📡 Ответ сервера: {msg.ctrl.code} {msg.ctrl.text}")
+                # Если код 200 — мы успешно вошли!
             
             if msg.HasField('data'):
-                # Декодируем сообщение
-                content = msg.data.content.decode('utf-8').strip('"')
-                print(f"📩 Сообщение от {msg.data.from_user_id}: {content}")
+                print(f"📩 Получено сообщение!")
                 
     except Exception as e:
         print(f"❌ Ошибка соединения: {e}")
