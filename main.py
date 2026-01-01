@@ -1,27 +1,7 @@
-options = [
-                ('grpc.max_receive_message_length', 10 * 1024 * 1024),
-                ('grpc.max_send_message_length', 10 * 1024 * 1024),
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 10000),
-                ('grpc.http2.max_pings_without_data', 0),
-                ('grpc.max_connection_idle_ms', 60000),
-                ('grpc.ssl_target_name_override', 'api.tinode.co'),  # Явная установка SNI
-            ]
-            
-            try:
-                # Сначала пытаемся с дефолтными credentials
-                credentials = grpc.ssl_channel_credentials()
-            except Exception as e:
-                logger.warning(f"⚠️  Ошибка при создании SSL credentials: {e}")
-                credentials = None
-            
-            logger.info(f"📡 Подключаемся к {HOST}...")
-            
-            self.channel = grpc.secure_channel(HOST, credentials, options=options)import os
+import os
 import time
 import grpc
 import logging
-import threading
 from tinode_grpc import pb
 from tinode_grpc import pbx
 
@@ -29,12 +9,12 @@ HOST = "api.tinode.co:443"
 BOT_LOGIN = os.getenv('BOT_LOGIN')
 BOT_PASSWORD = os.getenv('BOT_PASSWORD')
 
-# Configure logging - важно для Railway!
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),  # Вывод в stdout (видно в Railway)
+        logging.StreamHandler(),
     ]
 )
 logger = logging.getLogger(__name__)
@@ -50,14 +30,11 @@ class TinodeBot:
         self.msg_id = 0
         
     def get_next_id(self):
-        """Генерируем уникальные ID для сообщений"""
         self.msg_id += 1
         return str(self.msg_id)
     
     def message_generator(self):
-        """Генератор сообщений - отправляет по одному с ожиданием"""
         try:
-            # 1. Приветствие
             logger.info("📤 [1] Отправляем HI (приветствие)...")
             yield pb.ClientMsg(
                 hi=pb.ClientHi(
@@ -65,9 +42,8 @@ class TinodeBot:
                     user_agent="RailwayBot/1.0"
                 )
             )
-            time.sleep(0.5)  # Небольшая пауза
+            time.sleep(0.5)
             
-            # 2. Логин
             logger.info("📤 [2] Отправляем LOGIN...")
             secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
             yield pb.ClientMsg(
@@ -79,7 +55,6 @@ class TinodeBot:
             )
             time.sleep(0.5)
             
-            # 3. Подписка на 'me'
             logger.info("📤 [3] Отправляем SUB (подписка)...")
             yield pb.ClientMsg(
                 sub=pb.ClientSub(
@@ -90,7 +65,6 @@ class TinodeBot:
             
             logger.info("✅ Все начальные сообщения отправлены, слушаем ответы...")
             
-            # Держим connection открытым
             while self.running:
                 time.sleep(1)
                 
@@ -98,7 +72,6 @@ class TinodeBot:
             logger.error(f"❌ Ошибка в message_generator: {e}", exc_info=True)
     
     def connect(self):
-        """Подключается к серверу Tinode"""
         if not BOT_LOGIN or not BOT_PASSWORD:
             logger.error("❌ ОШИБКА: Проверь переменные BOT_LOGIN и BOT_PASSWORD!")
             return False
@@ -106,6 +79,7 @@ class TinodeBot:
         logger.info(f"🚀 Попытка входа для: {BOT_LOGIN}...")
         
         try:
+            # Опции для gRPC, включая правильный SNI
             options = [
                 ('grpc.max_receive_message_length', 10 * 1024 * 1024),
                 ('grpc.max_send_message_length', 10 * 1024 * 1024),
@@ -113,6 +87,7 @@ class TinodeBot:
                 ('grpc.keepalive_timeout_ms', 10000),
                 ('grpc.http2.max_pings_without_data', 0),
                 ('grpc.max_connection_idle_ms', 60000),
+                ('grpc.max_connection_age_ms', 600000),
             ]
             
             credentials = grpc.ssl_channel_credentials()
@@ -128,7 +103,6 @@ class TinodeBot:
             import sys
             sys.stdout.flush()
             
-            # Вызываем MessageLoop с генератором
             call = self.stub.MessageLoop(
                 self.message_generator(),
                 timeout=600
@@ -151,7 +125,6 @@ class TinodeBot:
                 sys.stdout.flush()
                 
                 try:
-                    # Обработка ctrl сообщений
                     if msg.HasField('ctrl'):
                         code = msg.ctrl.code
                         text = msg.ctrl.text
@@ -171,7 +144,6 @@ class TinodeBot:
                             logger.error(f"❌ Ошибка клиента {code}: {text}")
                             return False
                     
-                    # Обработка data сообщений
                     if msg.HasField('data'):
                         logger.info(f"📩 Новое сообщение!")
                         if hasattr(msg.data, 'content') and msg.data.content:
@@ -179,11 +151,9 @@ class TinodeBot:
                             logger.info(f"   📝 {content}")
                         sys.stdout.flush()
                     
-                    # Обработка meta сообщений
                     if msg.HasField('meta'):
                         logger.debug(f"📊 META update")
                     
-                    # Обработка info сообщений
                     if msg.HasField('info'):
                         logger.debug(f"ℹ️  INFO: {msg.info}")
                         
