@@ -1,3 +1,4 @@
 grpcio>=1.50.0
 grpcio-tools>=1.50.0
 tinode-grpc>=0.16
+websocket-client>=1.6.0
