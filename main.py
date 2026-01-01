@@ -1,205 +1,203 @@
 import os
+import json
 import time
-import grpc
 import logging
-from tinode_grpc import pb
-from tinode_grpc import pbx
+import websocket
+import base64
+from threading import Thread
 
-HOST = "api.tinode.co:443"
 BOT_LOGIN = os.getenv('BOT_LOGIN')
 BOT_PASSWORD = os.getenv('BOT_PASSWORD')
+HOST = "api.tinode.co"
+WS_URL = f"wss://{HOST}/v0/channels"
 
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-logger.info("=" * 60)
-logger.info("🤖 TINODE BOT STARTED")
-logger.info("=" * 60)
 
 class TinodeBot:
     def __init__(self):
-        self.channel = None
-        self.stub = None
+        self.ws = None
         self.running = False
         self.msg_id = 0
+        self.authenticated = False
         
     def get_next_id(self):
         self.msg_id += 1
         return str(self.msg_id)
     
-    def message_generator(self):
+    def send_message(self, msg_type, data):
+        """Отправляет сообщение на сервер"""
+        msg = {
+            "id": self.get_next_id(),
+            msg_type: data
+        }
         try:
-            logger.info("📤 [1] Отправляем HI (приветствие)...")
-            yield pb.ClientMsg(
-                hi=pb.ClientHi(
-                    id=self.get_next_id(),
-                    user_agent="RailwayBot/1.0"
-                )
-            )
-            time.sleep(0.5)
-            
-            logger.info("📤 [2] Отправляем LOGIN...")
-            secret = f"{BOT_LOGIN}:{BOT_PASSWORD}".encode('utf-8')
-            yield pb.ClientMsg(
-                login=pb.ClientLogin(
-                    id=self.get_next_id(),
-                    scheme="basic",
-                    secret=secret
-                )
-            )
-            time.sleep(0.5)
-            
-            logger.info("📤 [3] Отправляем SUB (подписка)...")
-            yield pb.ClientMsg(
-                sub=pb.ClientSub(
-                    id=self.get_next_id(),
-                    topic="me"
-                )
-            )
-            
-            logger.info("✅ Все начальные сообщения отправлены, слушаем ответы...")
-            
-            while self.running:
-                time.sleep(1)
-                
+            msg_json = json.dumps(msg)
+            logger.debug(f"📤 Отправляем [{msg_type}]: {msg_json[:100]}...")
+            self.ws.send(msg_json)
         except Exception as e:
-            logger.error(f"❌ Ошибка в message_generator: {e}", exc_info=True)
+            logger.error(f"❌ Ошибка отправки сообщения: {e}")
+    
+    def on_message(self, ws, message):
+        """Обработка входящих сообщений"""
+        try:
+            data = json.loads(message)
+            logger.debug(f"📥 Получено: {message[:150]}...")
+            
+            # Обработка ctrl сообщений
+            if 'ctrl' in data:
+                ctrl = data['ctrl']
+                code = ctrl.get('code', 0)
+                text = ctrl.get('text', '')
+                msg_id = ctrl.get('id', '?')
+                
+                logger.info(f"📡 [CTRL {code} #{msg_id}] {text}")
+                
+                if code == 201:
+                    logger.info("✅ Успешная регистрация сессии!")
+                elif code == 200:
+                    logger.info("✅ Успешная аутентификация!")
+                    self.authenticated = True
+                elif code >= 400:
+                    logger.error(f"❌ Ошибка {code}: {text}")
+            
+            # Обработка data сообщений
+            if 'data' in data:
+                data_msg = data['data']
+                logger.info(f"📩 Новое сообщение от {data_msg.get('from', '?')}")
+                content = data_msg.get('content', '')
+                if content:
+                    logger.info(f"   📝 {content[:100]}")
+            
+            # Обработка presense сообщений
+            if 'pres' in data:
+                logger.debug(f"ℹ️  Presence update")
+            
+            # Обработка meta сообщений
+            if 'meta' in data:
+                logger.debug(f"📊 Meta update")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON: {e}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки сообщения: {e}", exc_info=True)
+    
+    def on_error(self, ws, error):
+        logger.error(f"❌ WebSocket ошибка: {error}")
+    
+    def on_close(self, ws, close_status_code, close_msg):
+        logger.warning(f"⚠️  WebSocket закрыт [{close_status_code}]: {close_msg}")
+        self.running = False
+    
+    def on_open(self, ws):
+        """Вызывается когда WebSocket подключен"""
+        logger.info("✅ WebSocket подключен!")
+        
+        # 1. Отправляем HI (приветствие)
+        logger.info("📤 [1] Отправляем HI (приветствие)...")
+        self.send_message('hi', {
+            'user_agent': 'RailwayBot/1.0',
+            'lang': 'en'
+        })
+        
+        # 2. Отправляем LOGIN (логин)
+        time.sleep(0.5)
+        logger.info("📤 [2] Отправляем LOGIN...")
+        
+        # Кодируем credentials в base64
+        credentials = f"{BOT_LOGIN}:{BOT_PASSWORD}"
+        secret_b64 = base64.b64encode(credentials.encode()).decode()
+        
+        self.send_message('login', {
+            'scheme': 'basic',
+            'secret': secret_b64
+        })
+        
+        # 3. Подписываемся на 'me'
+        time.sleep(0.5)
+        logger.info("📤 [3] Отправляем SUB (подписка на 'me')...")
+        self.send_message('sub', {
+            'topic': 'me'
+        })
     
     def connect(self):
+        """Подключается к серверу Tinode через WebSocket"""
         if not BOT_LOGIN or not BOT_PASSWORD:
             logger.error("❌ ОШИБКА: Проверь переменные BOT_LOGIN и BOT_PASSWORD!")
             return False
         
         logger.info(f"🚀 Попытка входа для: {BOT_LOGIN}...")
+        logger.info(f"📡 Подключаемся к {WS_URL}...")
         
         try:
-            # Опции для gRPC, включая правильный SNI
-            options = [
-                ('grpc.max_receive_message_length', 10 * 1024 * 1024),
-                ('grpc.max_send_message_length', 10 * 1024 * 1024),
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 10000),
-                ('grpc.http2.max_pings_without_data', 0),
-                ('grpc.max_connection_idle_ms', 60000),
-                ('grpc.max_connection_age_ms', 600000),
-            ]
-            
-            credentials = grpc.ssl_channel_credentials()
-            logger.info(f"📡 Подключаемся к {HOST}...")
-            
-            self.channel = grpc.secure_channel(HOST, credentials, options=options)
-            self.stub = pbx.NodeStub(self.channel)
             self.running = True
+            self.authenticated = False
             
-            logger.info("🔄 Запускаем MessageLoop...")
-            logger.info("⏳ Ожидание ответов от сервера...")
+            # Отключаем SSL проверку сертификатов (для Railway)
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
             
-            import sys
-            sys.stdout.flush()
-            
-            call = self.stub.MessageLoop(
-                self.message_generator(),
-                timeout=600
+            self.ws = websocket.WebSocketApp(
+                WS_URL,
+                on_open=self.on_open,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close,
+                subprotocols=['tinode']
             )
             
-            logger.info("📡 Начинаем слушать сообщения...")
-            sys.stdout.flush()
+            # Запускаем WebSocket в отдельном потоке
+            wst = Thread(target=self.ws.run_forever, kwargs={'sslopt': {"cert_reqs": ssl.CERT_NONE}})
+            wst.daemon = True
+            wst.start()
             
-            message_count = 0
-            consecutive_errors = 0
-            last_msg_time = time.time()
+            logger.info("🔄 WebSocket запущен, ожидаем аутентификации...")
             
-            for msg in call:
-                current_time = time.time()
-                elapsed = current_time - last_msg_time
-                last_msg_time = current_time
-                message_count += 1
+            # Ждем аутентификации (максимум 30 сек)
+            for i in range(30):
+                if self.authenticated:
+                    logger.info("✅ Аутентификация успешна!")
+                    
+                    # Слушаем сообщения
+                    logger.info("📡 Слушаем входящие сообщения...")
+                    while self.running:
+                        time.sleep(1)
+                    
+                    return True
                 
-                logger.debug(f"📥 Сообщение #{message_count} получено (спустя {elapsed:.2f}s)")
-                sys.stdout.flush()
+                if not self.running:
+                    logger.error("❌ WebSocket закрылся до аутентификации")
+                    return False
                 
-                try:
-                    if msg.HasField('ctrl'):
-                        code = msg.ctrl.code
-                        text = msg.ctrl.text
-                        logger.info(f"📡 [CTRL {code}] {text}")
-                        sys.stdout.flush()
-                        
-                        if code == 200:
-                            logger.info("✅ Успешная аутентификация!")
-                            consecutive_errors = 0
-                        elif code >= 500:
-                            logger.error(f"❌ Ошибка сервера {code}: {text}")
-                            consecutive_errors += 1
-                            if consecutive_errors > 3:
-                                logger.error("Слишком много ошибок сервера, отключаемся")
-                                return False
-                        elif code >= 400:
-                            logger.error(f"❌ Ошибка клиента {code}: {text}")
-                            return False
-                    
-                    if msg.HasField('data'):
-                        logger.info(f"📩 Новое сообщение!")
-                        if hasattr(msg.data, 'content') and msg.data.content:
-                            content = str(msg.data.content)[:100]
-                            logger.info(f"   📝 {content}")
-                        sys.stdout.flush()
-                    
-                    if msg.HasField('meta'):
-                        logger.debug(f"📊 META update")
-                    
-                    if msg.HasField('info'):
-                        logger.debug(f"ℹ️  INFO: {msg.info}")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️  Ошибка обработки сообщения: {e}")
-                    continue
+                time.sleep(1)
             
-            logger.warning("⚠️  MessageLoop завершился без ошибки (соединение закрыто)")
-            return True
-            
-        except grpc.RpcError as rpc_error:
-            code = rpc_error.code()
-            details = rpc_error.details()
-            
-            logger.error(f"❌ gRPC ошибка [{code}]: {details}")
-            
-            if "UNAVAILABLE" in str(code):
-                logger.error("⚠️  Сервер недоступен")
-            if "ALPN" in details or "peer" in details:
-                logger.error("⚠️  Проблема с SSL/TLS")
-            
+            logger.error("❌ Таймаут аутентификации (30 сек)")
+            self.running = False
+            if self.ws:
+                self.ws.close()
             return False
             
         except Exception as e:
-            logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
+            logger.error(f"❌ Ошибка подключения: {e}", exc_info=True)
             return False
-            
-        finally:
-            self.running = False
-            if self.channel:
-                try:
-                    self.channel.close()
-                    logger.info("🔌 Канал закрыт")
-                except:
-                    pass
 
 def main():
     restart_delay = 5
     max_restart_delay = 300
     consecutive_failures = 0
     
-    logger.info("🌐 Адрес сервера: " + HOST)
-    logger.info("👤 Пользователь: " + (BOT_LOGIN if BOT_LOGIN else "не установлен"))
-    
-    import sys
-    sys.stdout.flush()
+    logger.info("=" * 60)
+    logger.info("🤖 TINODE BOT STARTED (WebSocket)")
+    logger.info("=" * 60)
+    logger.info(f"🌐 Адрес сервера: {HOST}")
+    logger.info(f"👤 Пользователь: {BOT_LOGIN if BOT_LOGIN else 'не установлен'}")
     
     while True:
         try:
